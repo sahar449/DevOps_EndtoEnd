@@ -118,6 +118,22 @@ jobs:
         run: |
           cd ArgoCD/myChart
           kubectl apply -f .
+      
+      - name: Smoke Test Application
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          echo "Running smoke test on https://www.saharbittman.com ..."
+          for i in $(seq 1 5); do
+            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://www.saharbittman.com || true)
+            if [ "$STATUS_CODE" = "200" ]; then
+              echo "✅ Smoke test passed."
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed — HTTP status: $STATUS_CODE"
+            sleep 5
+          done
+          echo "❌ Smoke test failed!"
+          exit 1
 
       - name: Destroy ArgoCD and Apps
         if: ${{ github.event.inputs.action == 'destroy' }}
