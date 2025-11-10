@@ -1,0 +1,67 @@
+name: CI Build & Test
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Bootstrap Infra"]
+    types:
+      - completed
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  aws_region: us-west-2
+  repo_name: eksdemo
+  image_tag: ${{ github.sha }}
+
+jobs:
+  ci:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.aws_region }}
+          role-session-name: github-actions
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./src
+          push: true
+          tags: |
+            ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ env.aws_region }}.amazonaws.com/${{ env.repo_name }}:${{ env.image_tag }}
+            ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ env.aws_region }}.amazonaws.com/${{ env.repo_name }}:latest
+
+      - name: Smoke Test
+        run: |
+          echo "⏳ Waiting for app to start..."
+          docker run -d --name test-container -p 5000:5000 \
+            ${{ secrets.AWS_ACCOUNT_NUMBER }}.dkr.ecr.${{ env.aws_region }}.amazonaws.com/${{ env.repo_name }}:${{ env.image_tag }}
+
+          sleep 5
+
+          for i in $(seq 1 5); do
+            RESPONSE=$(curl -s http://localhost:5000/healthz || true)
+            if [ "$RESPONSE" = "OK" ]; then
+              echo "✅ Smoke test passed."
+              docker rm -f test-container
+              exit 0
+            fi
+            echo "⚠️ Attempt $i failed — got: '$RESPONSE'"
+            sleep 5
+          done
+
+          echo "❌ Smoke test failed."
+          docker rm -f test-container
+          exit 1
+        shell: bash
