@@ -1,11 +1,16 @@
 name: CD to EKS
 
 on:
-  workflow_run:
-    workflows: ["CI Build & Test"]
-    types:
-      - completed
   workflow_dispatch:
+    inputs:
+      action:
+        description: "Choose action"
+        required: true
+        default: "apply"
+        type: choice
+        options:
+          - apply
+          - destroy
 
 permissions:
   id-token: write
@@ -20,7 +25,6 @@ env:
 
 jobs:
   cd:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
 
     steps:
@@ -40,6 +44,7 @@ jobs:
           kubectl get nodes
 
       - name: Patch aws-auth
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           cat <<'EOF' > aws-auth.yaml
           apiVersion: v1
@@ -57,6 +62,7 @@ jobs:
           kubectl apply -f aws-auth.yaml
 
       - name: Install / Upgrade ArgoCD Helm Chart
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           helm repo add argo https://argoproj.github.io/argo-helm
           helm repo update
@@ -68,6 +74,7 @@ jobs:
           kubectl -n argocd rollout status deployment/argocd-server --timeout=3m
 
       - name: Wait for ArgoCD LoadBalancer
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           for i in {1..30}; do
             ARGOCD_SERVER=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
@@ -82,6 +89,7 @@ jobs:
           fi
 
       - name: Get VPC ID and set environment variables
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=${{ env.vpc_name }}" \
@@ -91,6 +99,7 @@ jobs:
           echo "ECR_NAME=${{ secrets.ECR_NAME }}" >> $GITHUB_ENV
 
       - name: Apply ArgoCD Yamls
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           envsubst < ArgoCD/externalCharts/infra.yaml | kubectl apply -f -
           envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
@@ -98,15 +107,17 @@ jobs:
           kubectl get applications -n argocd
 
       - name: Apply Flask App
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           cd ArgoCD/myChart
           kubectl apply -f .
 
       - name: Smoke Test Application
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           echo "Running smoke test on https://www.saharbittman.com ..."
           for i in $(seq 1 30); do
-            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://www.saharbittman.com || true)
+            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -L https://www.saharbittman.com || true)
             if [ "$STATUS_CODE" = "200" ]; then
               echo "✅ Smoke test passed."
               exit 0
@@ -117,23 +128,8 @@ jobs:
           echo "❌ Smoke test failed!"
           exit 1
 
-  destroy-on-failure:
-    needs: cd
-    if: ${{ failure() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.aws_region }}
-          role-session-name: github-actions
-
-      - name: Update kubeconfig for EKS
-        run: |
-          aws eks update-kubeconfig --region ${{ env.aws_region }} --name ${{ env.cluster_name }}
-
-      - name: Destroy ArgoCD and Apps on Failure
+      - name: Destroy ArgoCD and Apps
+        if: ${{ github.event.inputs.action == 'destroy' }}
         run: |
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
@@ -146,6 +142,7 @@ jobs:
           helm uninstall argocd -n argocd --wait --timeout=2m || true
 
       - name: Cleanup ALBs and Target Groups
+        if: ${{ github.event.inputs.action == 'destroy' }}
         run: |
           echo "Cleaning up AWS ALBs and Target Groups..."
           export AWS_REGION=${{ env.aws_region }}
