@@ -123,7 +123,7 @@ jobs:
         if: ${{ github.event.inputs.action == 'apply' }}
         run: |
           echo "Running smoke test on https://www.saharbittman.com ..."
-          for i in $(seq 1 5); do
+          for i in $(seq 1 30); do
             STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" https://www.saharbittman.com || true)
             if [ "$STATUS_CODE" = "200" ]; then
               echo "✅ Smoke test passed."
