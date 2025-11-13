@@ -88,10 +88,7 @@ jobs:
             --query "Vpcs[0].VpcId" \
             --output text)
           echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
-          echo "AWS_ACCOUNT_NUMBER=${{ secrets.AWS_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
-          echo "CLUSTER_NAME=${{ env.cluster_name }}" >> $GITHUB_ENV
-          echo "AWS_REGION=${{ env.aws_region }}" >> $GITHUB_ENV
-          echo "DOMAIN_NAME=${{ env.domain_name }}" >> $GITHUB_ENV
+          echo "ECR_NAME=${{ secrets.ECR_NAME }}" >> $GITHUB_ENV
 
       - name: Apply ArgoCD Yamls
         run: |
