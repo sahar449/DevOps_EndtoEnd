@@ -96,7 +96,7 @@ jobs:
       - name: Apply ArgoCD Yamls
         run: |
           envsubst < ArgoCD/externalCharts/infra.yaml | kubectl apply -f -
-          envsubst < ArgoCD/myChart/argocd.yaml | kubectl apply -f -
+          envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
           sleep 10
           kubectl get applications -n argocd
 
