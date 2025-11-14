@@ -138,33 +138,48 @@ jobs:
           echo "❌ Smoke test failed!"
           exit 1
 
-      - name: Destroy ArgoCD and Apps
+      - name: Destroy ArgoCD, Apps, CLB, and Target Groups
         if: ${{ github.event.inputs.action == 'destroy' }}
+        env:
+          AWS_REGION: us-west-2
+          CLB_NAME: argocd-server
         run: |
+          # Remove finalizers from Applications, ApplicationSets, Ingress
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+
           kubectl get applicationsets.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+
           kubectl get ingress -A -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl delete applications.argoproj.io --all -n argocd --timeout=30s || true
-          kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=30s || true
+
+          # Delete ArgoCD resources
+          kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
+          kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=60s || true
+          kubectl delete ingress --all -A --timeout=60s || true
+
+          # Delete ArgoCD Helm release
           helm uninstall argocd -n argocd --wait --timeout=2m || true
 
-      - name: Cleanup ALBs and Target Groups
-        if: ${{ github.event.inputs.action == 'destroy' }}
-        run: |
-          echo "Cleaning up AWS ALBs and Target Groups..."
-          export AWS_REGION=${{ env.aws_region }}
+          # Delete service if exists
+          kubectl get svc -n argocd ${CLB_NAME} -o name 2>/dev/null | \
+            xargs -r kubectl delete -n argocd || true
 
-          for lb_arn in $(aws elbv2 describe-load-balancers --region $AWS_REGION --query 'LoadBalancers[?starts_with(LoadBalancerName, `argocd`)].LoadBalancerArn' --output text); do
-            echo "Deleting Load Balancer $lb_arn"
-            aws elbv2 delete-load-balancer --region $AWS_REGION --load-balancer-arn $lb_arn || true
-          done
-
-          for tg_arn in $(aws elbv2 describe-target-groups --region $AWS_REGION --query 'TargetGroups[?starts_with(TargetGroupName, `argocd`)].TargetGroupArn' --output text); do
-            echo "Deleting Target Group $tg_arn"
-            aws elbv2 delete-target-group --region $AWS_REGION --target-group-arn $tg_arn || true
-          done
-
+          # Delete Load Balancer and all its Target Groups in one command
+          aws elbv2 describe-load-balancers \
+            --names "$CLB_NAME" \
+            --region "$AWS_REGION" \
+            --query "LoadBalancers[0].LoadBalancerArn" \
+            --output text | \
+          xargs -r -I {} sh -c '
+            LB_ARN="{}"
+            # Delete associated Target Groups
+            aws elbv2 describe-target-groups \
+              --load-balancer-arn "$LB_ARN" \
+              --region "$AWS_REGION" \
+              --query "TargetGroups[].TargetGroupArn" \
+              --output text | xargs -r -n 1 aws elbv2 delete-target-group --target-group-arn {} --region "$AWS_REGION"
+            # Delete the Load Balancer
+            aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" --region "$AWS_REGION"
           echo "✅ AWS ALBs and Target Groups cleanup completed."
