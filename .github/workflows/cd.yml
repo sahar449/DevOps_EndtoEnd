@@ -1,6 +1,11 @@
 name: CD to EKS
 
 on:
+  workflow_run:
+    workflows: ["CI Build & Test"]
+    types:
+      - completed
+
   workflow_dispatch:
     inputs:
       action:
@@ -18,143 +23,38 @@ permissions:
 
 env:
   aws_region: us-west-2
-  cluster_name: eksdemo-cluster
-  repo_name: eksdemo
-  vpc_name: eksdemo-vpc
-  domain_name: saharbittman.com
+  cluster_name: eksdemo3
 
 jobs:
-  cd:
+  deploy:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success')
+
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      # Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      # Configure AWS credentials (OIDC)
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-to-assume: arn:aws:iam::123456789012:role/github-oidc
           aws-region: ${{ env.aws_region }}
-          role-session-name: github-actions
 
-      - name: Update kubeconfig for EKS
+      # kubectl config
+      - name: Update kubeconfig
         run: |
-          aws eks update-kubeconfig --region ${{ env.aws_region }} --name ${{ env.cluster_name }}
-          kubectl get nodes
+          aws eks update-kubeconfig \
+            --name ${{ env.cluster_name }} \
+            --region ${{ env.aws_region }}
 
-      - name: Patch aws-auth
-        if: ${{ github.event.inputs.action == 'apply' }}
+      # Deploy using kubectl
+      - name: Apply manifests
         run: |
-          cat <<'EOF' > aws-auth.yaml
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: aws-auth
-            namespace: kube-system
-          data:
-            mapUsers: |
-              - userarn: arn:aws:iam::${{ secrets.AWS_ACCOUNT_NUMBER }}:user/${{ secrets.AWS_USER }}
-                username: ${{ secrets.AWS_USER }}
-                groups:
-                  - system:masters
-          EOF
-          kubectl apply -f aws-auth.yaml
+          kubectl apply -f k8s/
 
-      - name: Install / Upgrade ArgoCD Helm Chart
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          helm repo add argo https://argoproj.github.io/argo-helm
-          helm repo update
-          helm upgrade --install argocd argo/argo-cd \
-            --namespace argocd \
-            --create-namespace \
-            --set server.service.type=LoadBalancer \
-            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="classic"
-          kubectl -n argocd rollout status deployment/argocd-server --timeout=3m
-
-      - name: Wait for ArgoCD LoadBalancer
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          for i in {1..30}; do
-            ARGOCD_SERVER=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [[ -n "$ARGOCD_SERVER" ]]; then
-              echo "ARGOCD_SERVER=$ARGOCD_SERVER" >> $GITHUB_ENV
-              break
-            fi
-            sleep 10
-          done
-          if [[ -z "$ARGOCD_SERVER" ]]; then
-            exit 1
-          fi
-
-      - name: Get VPC ID and set environment variables
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          VPC_ID=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Name,Values=${{ env.vpc_name }}" \
-            --query "Vpcs[0].VpcId" \
-            --output text)
-          echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
-          echo "ECR_NAME=${{ secrets.ECR_NAME }}" >> $GITHUB_ENV
-
-      - name: Apply ArgoCD Yamls
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          envsubst < ArgoCD/externalCharts/infra.yaml | kubectl apply -f -
-          envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
-          sleep 10
-          kubectl get applications -n argocd
-
-      - name: Apply Flask App
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          cd ArgoCD/myChart
-          kubectl apply -f .
-
-      - name: Smoke Test Application
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          echo "Running smoke test on https://www.saharbittman.com ..."
-          for i in $(seq 1 30); do
-            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -L https://www.saharbittman.com || true)
-            if [ "$STATUS_CODE" = "200" ]; then
-              echo "✅ Smoke test passed."
-              exit 0
-            fi
-            echo "⚠️ Attempt $i failed — HTTP status: $STATUS_CODE"
-            sleep 15
-          done
-          echo "❌ Smoke test failed!"
-          exit 1
-
-      - name: Destroy ArgoCD and Apps
-        if: ${{ github.event.inputs.action == 'destroy' }}
-        run: |
-          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl get applicationsets.argoproj.io -n argocd -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl get ingress -A -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl delete applications.argoproj.io --all -n argocd --timeout=30s || true
-          kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=30s || true
-          helm uninstall argocd -n argocd --wait --timeout=2m || true
-
-      - name: Cleanup ALBs and Target Groups
-        if: ${{ github.event.inputs.action == 'destroy' }}
-        run: |
-          echo "Cleaning up AWS ALBs and Target Groups..."
-          export AWS_REGION=${{ env.aws_region }}
-
-          for lb_arn in $(aws elbv2 describe-load-balancers --region $AWS_REGION --query 'LoadBalancers[?starts_with(LoadBalancerName, `argocd`)].LoadBalancerArn' --output text); do
-            echo "Deleting Load Balancer $lb_arn"
-            aws elbv2 delete-load-balancer --region $AWS_REGION --load-balancer-arn $lb_arn || true
-          done
-
-          for tg_arn in $(aws elbv2 describe-target-groups --region $AWS_REGION --query 'TargetGroups[?starts_with(TargetGroupName, `argocd`)].TargetGroupArn' --output text); do
-            echo "Deleting Target Group $tg_arn"
-            aws elbv2 delete-target-group --region $AWS_REGION --target-group-arn $tg_arn || true
-          done
-
-          echo "✅ AWS ALBs and Target Groups cleanup completed."
