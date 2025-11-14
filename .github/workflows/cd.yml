@@ -115,13 +115,7 @@ jobs:
           envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
           sleep 10
           kubectl get applications -n argocd
-
-      - name: Apply Flask App
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          cd ArgoCD/myChart
-          kubectl apply -f .
-
+          
       - name: Smoke Test Application
         if: ${{ github.event.inputs.action == 'apply' }}
         run: |
