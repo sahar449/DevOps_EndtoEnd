@@ -138,13 +138,11 @@ jobs:
           AWS_REGION: us-west-2
           CLB_NAME: argocd-server
         run: |
-          # Remove finalizers from Applications, ApplicationSets, Ingress
+          # Remove finalizers
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-
           kubectl get applicationsets.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-
           kubectl get ingress -A -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
 
@@ -152,28 +150,16 @@ jobs:
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
           kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=60s || true
           kubectl delete ingress --all -A --timeout=60s || true
-
-          # Delete ArgoCD Helm release
           helm uninstall argocd -n argocd --wait --timeout=2m || true
+          kubectl delete svc -n argocd ${CLB_NAME} --ignore-not-found
 
-          # Delete service if exists
-          kubectl get svc -n argocd ${CLB_NAME} -o name 2>/dev/null | \
-            xargs -r kubectl delete -n argocd || true
-
-          # Delete Load Balancer and all its Target Groups in one command
-          aws elbv2 describe-load-balancers \
-            --names "$CLB_NAME" \
-            --region "$AWS_REGION" \
-            --query "LoadBalancers[0].LoadBalancerArn" \
-            --output text | \
-          xargs -r -I {} sh -c '
-            LB_ARN="{}"
-            # Delete associated Target Groups
-            aws elbv2 describe-target-groups \
-              --load-balancer-arn "$LB_ARN" \
-              --region "$AWS_REGION" \
-              --query "TargetGroups[].TargetGroupArn" \
-              --output text | xargs -r -n 1 aws elbv2 delete-target-group --target-group-arn {} --region "$AWS_REGION"
-            # Delete the Load Balancer
-            aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" --region "$AWS_REGION"
-          echo "✅ AWS ALBs and Target Groups cleanup completed."
+          # Delete ALB and Target Groups
+          LB_ARN=$(aws elbv2 describe-load-balancers --names "$CLB_NAME" --region "$AWS_REGION" --query "LoadBalancers[0].LoadBalancerArn" --output text)
+          for TG in $(aws elbv2 describe-target-groups --load-balancer-arn "$LB_ARN" --region "$AWS_REGION" --query "TargetGroups[].TargetGroupArn" --output text); do
+            TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG" --region "$AWS_REGION" --query "TargetHealthDescriptions[].Target.Id" --output text)
+            for T in $TARGETS; do
+              aws elbv2 deregister-targets --target-group-arn "$TG" --targets Id=$T --region "$AWS_REGION"
+            done
+            aws elbv2 delete-target-group --target-group-arn "$TG" --region "$AWS_REGION"
+          done
+          aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" --region "$AWS_REGION"
