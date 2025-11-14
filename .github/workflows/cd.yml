@@ -27,7 +27,7 @@ env:
   repo_name: eksdemo
   vpc_name: eksdemo-vpc
   domain_name: saharbittman.com
-  
+
 jobs:
   deploy:
     if: |
@@ -106,6 +106,7 @@ jobs:
             --output text)
           echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
           echo "ECR_NAME=${{ secrets.ECR_NAME }}" >> $GITHUB_ENV
+          echo "AWS_ACCOUNT_NUMBER=${{ secrets.AWS_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
 
       - name: Apply ArgoCD Yamls
         if: ${{ github.event.inputs.action == 'apply' }}
