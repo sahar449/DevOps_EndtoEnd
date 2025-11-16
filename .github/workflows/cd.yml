@@ -74,8 +74,9 @@ jobs:
                   - system:masters
           EOF
 
-      - name: Install ArgoCD
-        if: steps.kubectl.outcome == 'success' && github.event.inputs.action != 'destroy'
+      - name: Install / Upgrade ArgoCD Helm Chart
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: install_argocd
         run: |
           helm repo add argo https://argoproj.github.io/argo-helm
           helm repo update
@@ -83,9 +84,10 @@ jobs:
             --namespace argocd \
             --create-namespace \
             --set server.service.type=LoadBalancer \
-            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic
-          
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="classic" \
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.argocd_clb_name }}" 
           kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
+          echo "✅ ArgoCD installed successfully"
 
       - name: Get VPC and Deploy Apps
         if: steps.kubectl.outcome == 'success' && github.event.inputs.action != 'destroy'
