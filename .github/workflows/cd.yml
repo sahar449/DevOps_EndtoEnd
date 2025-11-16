@@ -115,74 +115,86 @@ jobs:
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
           echo "🗑️ Starting cleanup..."
-          
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }} || true
 
-          # Remove Kubernetes finalizers
+          aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.CLUSTER_NAME }}" || true
+
+          echo "🔧 Removing Kubernetes finalizers..."
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
           kubectl get ingress -A -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
 
-          # Delete Kubernetes resources
-          echo "Deleting ingresses first..."
+          echo "🗑️ Deleting ingresses..."
           kubectl delete ingress --all -A --timeout=60s || true
-          
-          echo "Deleting applications..."
+
+          echo "🗑️ Deleting ArgoCD Applications..."
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
-          
-          echo "Uninstalling ArgoCD..."
+
+          echo "🗑️ Uninstalling ArgoCD..."
           helm uninstall argocd -n argocd --timeout=2m || true
 
           echo "⏳ Waiting for AWS to process deletions..."
           sleep 30
 
-          # Delete Target Groups by Tag
-          echo "🗑️ Cleaning Target Groups with tag Application=flask-app..."
+          echo "🗑️ Searching for Target Groups with tag Application=flask-app..."
 
           AWS_REGION="${{ env.AWS_REGION }}"
           TAG_KEY="Application"
           TAG_VALUE="flask-app"
 
-          all_tgs=$(aws elbv2 describe-target-groups --region "$AWS_REGION" --query 'TargetGroups[].TargetGroupArn' --output text)
+          all_tgs=$(aws elbv2 describe-target-groups --region "$AWS_REGION" \
+            --query 'TargetGroups[].TargetGroupArn' --output text)
+
           tg_list=""
 
           for tg in $all_tgs; do
-            tag_value=$(aws elbv2 describe-tags --region "$AWS_REGION" --resource-arns "$tg" \
-              --query "TagDescriptions[0].Tags[?Key=='$TAG_KEY'].Value | [0]" --output text)
-            if [ "$tag_value" == "$TAG_VALUE" ]; then
-              tg_list+="$tg "
+            tag_value=$(aws elbv2 describe-tags \
+              --region "$AWS_REGION" \
+              --resource-arns "$tg" \
+              --query "TagDescriptions[0].Tags[?Key=='$TAG_KEY'].Value | [0]" \
+              --output text)
+
+            if [ "$tag_value" = "$TAG_VALUE" ]; then
+              tg_list="$tg_list $tg"
             fi
           done
 
           if [ -z "$tg_list" ]; then
             echo "ℹ️ No Target Groups found with tag $TAG_KEY=$TAG_VALUE"
           else
-            echo "Found Target Groups:"
+            echo "🧾 Found Target Groups:"
             echo "$tg_list"
 
             for tg in $tg_list; do
               echo "🗑️ Processing Target Group: $tg"
-              targets=$(aws elbv2 describe-target-health --target-group-arn "$tg" \
+
+              targets=$(aws elbv2 describe-target-health \
+                --target-group-arn "$tg" \
                 --region "$AWS_REGION" \
-                --query 'TargetHealthDescriptions[].Target.Id' --output text)
+                --query 'TargetHealthDescriptions[].Target.Id' \
+                --output text)
+
               if [ -n "$targets" ]; then
                 for target in $targets; do
-                  echo "  Deregistering target: $target"
-                  aws elbv2 deregister-targets --target-group-arn "$tg" \
-                    --targets Id=$target --region "$AWS_REGION" || true
+                  echo "  🔌 Deregistering target: $target"
+                  aws elbv2 deregister-targets \
+                    --target-group-arn "$tg" \
+                    --targets Id="$target" \
+                    --region "$AWS_REGION" || true
                 done
-                echo "  ✅ Targets deregistered"
+                echo "  ✅ All targets deregistered."
               else
                 echo "  ℹ️ No targets to deregister"
               fi
-              echo "  Deleting Target Group..."
+
+              echo "  🗑️ Deleting Target Group..."
               aws elbv2 delete-target-group --target-group-arn "$tg" --region "$AWS_REGION"
-              echo "  ✅ Target Group deleted"
+              echo "  ✅ Target Group deleted."
             done
           fi
 
-          echo "✅ Cleanup complete"
+          echo "🎉 Cleanup complete!"
+
 
 
   destroy-bootstrap:
