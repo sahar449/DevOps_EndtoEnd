@@ -1,9 +1,7 @@
+# Workflow: CD to EKS
 name: CD to EKS
 
 on:
-  workflow_run:
-    workflows: ["CI Build & Test"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       action:
@@ -28,11 +26,7 @@ env:
 
 jobs:
   deploy:
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,12 +38,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions
 
-      # ========== Apply ==========
+      # Update kubeconfig
       - name: Update kubeconfig for EKS
         if: github.event.inputs.action == 'apply'
         run: |
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
+      # Configure aws-auth
       - name: Configure aws-auth
         if: github.event.inputs.action == 'apply'
         run: |
@@ -67,6 +62,7 @@ jobs:
                   - system:masters
           EOF
 
+      # Install ArgoCD
       - name: Install ArgoCD
         if: github.event.inputs.action == 'apply'
         run: |
@@ -78,12 +74,9 @@ jobs:
             --set server.service.type=LoadBalancer \
             --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic \
             --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}"
-          
           kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
-          echo "✅ ArgoCD installed successfully"
 
-          
-
+      # Deploy apps
       - name: Get VPC and Deploy Apps
         if: github.event.inputs.action == 'apply'
         run: |
@@ -92,19 +85,18 @@ jobs:
             --query "Vpcs[0].VpcId" --output text)
           export ECR_NAME=${{ secrets.ECR_NAME }}
           export AWS_ACCOUNT_NUMBER=${{ secrets.AWS_ACCOUNT_NUMBER }}
-          
           envsubst < ArgoCD/externalCharts/infra.yaml | kubectl apply -f -
           envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
-          
           sleep 10
           kubectl get applications -n argocd
 
+      # Smoke test
       - name: Smoke Test
         if: github.event.inputs.action == 'apply'
         run: |
-          echo "Testing https://www.saharbittman.com"
           for i in {1..30}; do
-            status=$(curl -s -o /dev/null -w "%{http_code}" https://www.saharbittman.com || echo "000")
+            status=$(curl -s -w "%{http_code}" -o /tmp/curl_output.txt https://www.saharbittman.com || echo "000")
+            cat /tmp/curl_output.txt
             if [ "$status" = "200" ]; then
               echo "✅ App is live!"
               exit 0
@@ -115,76 +107,56 @@ jobs:
           echo "❌ Smoke test failed"
           exit 1
 
-      # ========== DESTROY ==========
+      # Destroy everything
       - name: Destroy Everything
-        if: github.event.inputs.action == 'destroy' || failure()
+        if: github.event.inputs.action == 'destroy'
         run: |
-          echo "🗑️ Starting cleanup..."
-          
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }} || true
-
-          # Remove Kubernetes finalizers
-          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-          kubectl get ingress -A -o name 2>/dev/null | \
-            xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-
-          # Delete Kubernetes resources
-          echo "Deleting ingresses first..."
+          # Cleanup Kubernetes
+          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
           kubectl delete ingress --all -A --timeout=60s || true
-          
-          echo "Deleting applications..."
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
-          
-          echo "Uninstalling ArgoCD..."
           helm uninstall argocd -n argocd --timeout=2m || true
+          echo "✅ CD destroy complete"
 
-          echo "⏳ Waiting for AWS to process deletions..."
-          sleep 30
+# ----------------------------
+# Workflow: Bootstrap Infra
+# This workflow is triggered automatically after CD to EKS destroy finishes
+# ----------------------------
+name: Bootstrap Infra
 
-          # Delete Target Groups by Tag
-          echo "🗑️ Cleaning Target Groups with tag Application=flask-app..."
+on:
+  workflow_run:
+    workflows: ["CD to EKS"]
+    types:
+      - completed
 
-          AWS_REGION="${{ env.AWS_REGION }}"
-          TAG_KEY="Application"
-          TAG_VALUE="flask-app"
+jobs:
+  bootstrap-destroy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-          all_tgs=$(aws elbv2 describe-target-groups --region "$AWS_REGION" --query 'TargetGroups[].TargetGroupArn' --output text)
-          tg_list=""
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: us-west-2
+          role-session-name: github-actions
 
-          for tg in $all_tgs; do
-            tag_value=$(aws elbv2 describe-tags --region "$AWS_REGION" --resource-arns "$tg" \
-              --query "TagDescriptions[0].Tags[?Key=='$TAG_KEY'].Value | [0]" --output text)
-            if [ "$tag_value" == "$TAG_VALUE" ]; then
-              tg_list+="$tg "
-            fi
-          done
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
 
-          if [ -z "$tg_list" ]; then
-            echo "ℹ️ No Target Groups found with tag $TAG_KEY=$TAG_VALUE"
-          else
-            echo "Found Target Groups:"
-            echo "$tg_list"
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init -upgrade
 
-            for tg in $tg_list; do
-              echo "🗑️ Processing Target Group: $tg"
-              targets=$(aws elbv2 describe-target-health --target-group-arn "$tg" \
-                --region "$AWS_REGION" \
-                --query 'TargetHealthDescriptions[].Target.Id' --output text)
-              if [ -n "$targets" ]; then
-                for target in $targets; do
-                  echo "  Deregistering target: $target"
-                  aws elbv2 deregister-targets --target-group-arn "$tg" \
-                    --targets Id=$target --region "$AWS_REGION" || true
-                done
-                echo "  ✅ Targets deregistered"
-              else
-                echo "  ℹ️ No targets to deregister"
-              fi
-              echo "  Deleting Target Group..."
-              aws elbv2 delete-target-group --target-group-arn "$tg" --region "$AWS_REGION"
-              echo "  ✅ Target Group deleted"
-            done
-          fi
-
-          echo "✅ Cleanup complete"
+      - name: Terraform Destroy
+        run: |
+          cd infra
+          terraform destroy -auto-approve
