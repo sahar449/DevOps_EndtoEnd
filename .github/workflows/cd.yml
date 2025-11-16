@@ -9,7 +9,7 @@ on:
       action:
         description: "Deploy or Destroy"
         required: true
-        default: "deploy"
+        default: "apply"
         type: choice
         options:
           - apply
@@ -120,7 +120,7 @@ jobs:
 
       # ========== DESTROY ==========
       - name: Destroy Everything
-        if: (github.event.inputs.action == 'destroy' || failure()) && steps.kubectl.outcome == 'success'
+        if: github.event.inputs.action == 'destroy' || failure()
         run: |
           echo "🗑️ Starting cleanup..."
           
