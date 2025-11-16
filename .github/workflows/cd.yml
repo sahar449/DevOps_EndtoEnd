@@ -70,19 +70,6 @@ jobs:
       - name: Install ArgoCD
         if: github.event.inputs.action == 'apply'
         run: |
-          # Get VPC ID
-          VPC_ID=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
-            --query "Vpcs[0].VpcId" --output text)
-          
-          # Get public subnets from VPC
-          SUBNETS=$(aws ec2 describe-subnets \
-            --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*public*" \
-            --query "Subnets[].SubnetId" --output text | tr '\t' ',')
-          
-          echo "VPC ID: $VPC_ID"
-          echo "Subnets: $SUBNETS"
-          
           helm repo add argo https://argoproj.github.io/argo-helm
           helm repo update
           helm upgrade --install argocd argo/argo-cd \
@@ -90,7 +77,9 @@ jobs:
             --create-namespace \
             --set server.service.type=LoadBalancer \
             --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic \
-            --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-subnets"="$SUBNETS"
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}" \
+          kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
+          echo "✅ ArgoCD installed successfully"
           
 
       - name: Get VPC and Deploy Apps
