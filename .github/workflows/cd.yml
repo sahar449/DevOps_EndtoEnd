@@ -2,6 +2,10 @@
 name: CD to EKS
 
 on:
+  workflow_run:
+    workflows: ["CI Build & Test"]
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       action:
