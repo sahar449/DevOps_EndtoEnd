@@ -110,16 +110,110 @@ jobs:
           echo "❌ Smoke test failed"
           exit 1
 
-      # Destroy everything
+      # ========== DESTROY ==========
       - name: Destroy Everything
-        if: github.event.inputs.action == 'destroy'
+        if: github.event.inputs.action == 'destroy' || failure()
         run: |
+          echo "🗑️ Starting cleanup..."
+          
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }} || true
-          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          # Remove Kubernetes finalizers
+          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
+            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          kubectl get ingress -A -o name 2>/dev/null | \
+            xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          # Delete Kubernetes resources
+          echo "Deleting ingresses first..."
           kubectl delete ingress --all -A --timeout=60s || true
+          
+          echo "Deleting applications..."
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
+          
+          echo "Uninstalling ArgoCD..."
           helm uninstall argocd -n argocd --timeout=2m || true
-          echo "✅ CD destroy complete"
+          echo "⏳ Waiting for AWS to process deletions..."
+          sleep 30
+          # Delete Flask ALB and Target Groups
+          echo "🗑️ Processing Flask ALB..."
+          alb=$(aws elbv2 describe-load-balancers --region ${{ env.AWS_REGION }} \
+            --names ${{ env.FLASK_ALB }} \
+            --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || echo "")
+          
+          if [ -n "$alb" ] && [ "$alb" != "None" ]; then
+            echo "Found ALB: $alb"
+            
+            # Step 1: Get all target groups
+            echo "Getting Target Groups..."
+            tg_list=$(aws elbv2 describe-target-groups \
+              --load-balancer-arn "$alb" --region ${{ env.AWS_REGION }} \
+              --query 'TargetGroups[].TargetGroupArn' --output text 2>/dev/null || echo "")
+            
+            # Step 2: Deregister and delete target groups FIRST
+            if [ -n "$tg_list" ]; then
+              for tg in $tg_list; do
+                echo "Processing Target Group: $tg"
+                
+                # Deregister all targets
+                targets=$(aws elbv2 describe-target-health --target-group-arn "$tg" \
+                  --region ${{ env.AWS_REGION }} \
+                  --query 'TargetHealthDescriptions[].Target.Id' --output text 2>/dev/null || echo "")
+                
+                for target in $targets; do
+                  echo "Deregistering target: $target"
+                  aws elbv2 deregister-targets --target-group-arn "$tg" \
+                    --targets Id=$target --region ${{ env.AWS_REGION }} 2>/dev/null || true
+                done
+                
+                sleep 3
+                
+                # Delete target group
+                echo "Deleting Target Group: $tg"
+                aws elbv2 delete-target-group --target-group-arn "$tg" \
+                  --region ${{ env.AWS_REGION }} 2>/dev/null || true
+              done
+              echo "✅ Target Groups deleted"
+            fi
+            
+            # Step 3: Now delete the ALB
+            sleep 5
+            echo "Deleting ALB..."
+            aws elbv2 delete-load-balancer --load-balancer-arn "$alb" \
+              --region ${{ env.AWS_REGION }} || true
+            echo "✅ Flask ALB deleted"
+          else
+            echo "ℹ️ Flask ALB not found"
+          fi
+          # Cleanup ALL orphaned Target Groups with eksdemo pattern
+          echo "🧹 Cleaning orphaned Target Groups..."
+          sleep 10
+          
+          all_tgs=$(aws elbv2 describe-target-groups --region ${{ env.AWS_REGION }} \
+            --query "TargetGroups[?contains(TargetGroupName, 'eksdemo')].TargetGroupArn" \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$all_tgs" ]; then
+            for tg in $all_tgs; do
+              echo "Force deleting Target Group: $tg"
+              
+              # Deregister all targets
+              targets=$(aws elbv2 describe-target-health --target-group-arn "$tg" \
+                --region ${{ env.AWS_REGION }} \
+                --query 'TargetHealthDescriptions[].Target.Id' --output text 2>/dev/null || echo "")
+              
+              for target in $targets; do
+                aws elbv2 deregister-targets --target-group-arn "$tg" \
+                  --targets Id=$target --region ${{ env.AWS_REGION }} 2>/dev/null || true
+              done
+              
+              sleep 3
+              aws elbv2 delete-target-group --target-group-arn "$tg" \
+                --region ${{ env.AWS_REGION }} 2>/dev/null || true
+            done
+            echo "✅ All Target Groups cleaned"
+          else
+            echo "ℹ️ No orphaned Target Groups found"
+          fi
+          echo "✅ Cleanup complete"
 
   destroy-bootstrap:
     needs: deploy
