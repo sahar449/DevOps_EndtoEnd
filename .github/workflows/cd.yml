@@ -12,7 +12,7 @@ on:
         default: "deploy"
         type: choice
         options:
-          - deploy
+          - apply
           - destroy
 
 permissions:
