@@ -44,21 +44,14 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions
 
-      # ========== DEPLOY ==========
-      - name: Setup kubectl
-        if: github.event.inputs.action != 'destroy'
-        id: kubectl
-        continue-on-error: true
+      # ========== Apply ==========
+      - name: Update kubeconfig for EKS
+        if: github.event.inputs.action == 'apply'
         run: |
-          if ! aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} &>/dev/null; then
-            echo "⚠️ Cluster not ready yet, skipping deployment"
-            exit 1
-          fi
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
-          kubectl get nodes
+          aws eks update-kubeconfig --region ${{ env.aws_region }} --name ${{ env.cluster_name }}
 
       - name: Configure aws-auth
-        if: steps.kubectl.outcome == 'success' && github.event.inputs.action != 'destroy'
+        if: github.event.inputs.action == 'apply'
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
@@ -75,7 +68,7 @@ jobs:
           EOF
 
       - name: Install / Upgrade ArgoCD Helm Chart
-        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        if:  github.event.inputs.action == 'apply'
         id: install_argocd
         run: |
           helm repo add argo https://argoproj.github.io/argo-helm
@@ -90,7 +83,7 @@ jobs:
           echo "✅ ArgoCD installed successfully"
 
       - name: Get VPC and Deploy Apps
-        if: steps.kubectl.outcome == 'success' && github.event.inputs.action != 'destroy'
+        if: github.event.inputs.action == 'apply'
         run: |
           export VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
@@ -105,7 +98,7 @@ jobs:
           kubectl get applications -n argocd
 
       - name: Smoke Test
-        if: steps.kubectl.outcome == 'success' && github.event.inputs.action != 'destroy'
+        if: github.event.inputs.action == 'apply'
         run: |
           echo "Testing https://www.saharbittman.com"
           for i in {1..30}; do
