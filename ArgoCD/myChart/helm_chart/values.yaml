@@ -25,6 +25,8 @@ ingress:
     alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
     alb.ingress.kubernetes.io/tags: ManagedBy=argocd,Application=flask-app,Environment=production
     external-dns.alpha.kubernetes.io/hostname: www.saharbittman.com
+    alb.ingress.kubernetes.io/load-balancer-name: eksdemo-flask-alb
+    alb.ingress.kubernetes.io/target-group-name: eksdemo-flask-tg
   hosts:
     - host: www.saharbittman.com
       paths:
