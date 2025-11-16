@@ -44,13 +44,13 @@ jobs:
 
       # Update kubeconfig
       - name: Update kubeconfig for EKS
-        if: github.event.inputs.action == 'apply'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
       # Configure aws-auth
       - name: Configure aws-auth
-        if: github.event.inputs.action == 'apply'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           cat <<EOF | kubectl apply -f -
           apiVersion: v1
@@ -68,7 +68,7 @@ jobs:
 
       # Install ArgoCD
       - name: Install ArgoCD
-        if: github.event.inputs.action == 'apply'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           helm repo add argo https://argoproj.github.io/argo-helm
           helm repo update
@@ -82,7 +82,7 @@ jobs:
 
       # Deploy apps
       - name: Get VPC and Deploy Apps
-        if: github.event.inputs.action == 'apply'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           export VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=${{ env.VPC_NAME }}" \
@@ -96,7 +96,7 @@ jobs:
 
       # Smoke test
       - name: Smoke Test
-        if: github.event.inputs.action == 'apply'
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           for i in {1..30}; do
             status=$(curl -s -w "%{http_code}" https://www.saharbittman.com -o >(cat) || echo "000")
