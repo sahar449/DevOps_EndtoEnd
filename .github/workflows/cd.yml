@@ -47,13 +47,39 @@ jobs:
           aws-region: ${{ env.aws_region }}
           role-session-name: github-actions
 
+      - name: Check if EKS cluster exists
+        id: check_cluster
+        run: |
+          if aws eks describe-cluster --name ${{ env.cluster_name }} --region ${{ env.aws_region }} 2>/dev/null; then
+            echo "cluster_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ EKS cluster exists"
+          else
+            echo "cluster_exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ EKS cluster does not exist yet"
+          fi
+
+      - name: Wait for cluster to be ready
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        run: |
+          echo "Waiting for EKS cluster to be in ACTIVE state..."
+          for i in {1..30}; do
+            STATUS=$(aws eks describe-cluster --name ${{ env.cluster_name }} --region ${{ env.aws_region }} --query 'cluster.status' --output text)
+            if [ "$STATUS" = "ACTIVE" ]; then
+              echo "✅ Cluster is ACTIVE"
+              break
+            fi
+            echo "⏳ Cluster status: $STATUS (attempt $i/30)"
+            sleep 10
+          done
+
       - name: Update kubeconfig for EKS
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
         run: |
           aws eks update-kubeconfig --region ${{ env.aws_region }} --name ${{ env.cluster_name }}
-          kubectl get nodes
+          kubectl get nodes || echo "⚠️ No nodes ready yet"
 
       - name: Patch aws-auth
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
         run: |
           cat <<'EOF' > aws-auth.yaml
           apiVersion: v1
@@ -69,9 +95,11 @@ jobs:
                   - system:masters
           EOF
           kubectl apply -f aws-auth.yaml
+          echo "✅ aws-auth patched successfully"
 
       - name: Install / Upgrade ArgoCD Helm Chart
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: install_argocd
         run: |
           helm repo add argo https://argoproj.github.io/argo-helm
           helm repo update
@@ -79,26 +107,35 @@ jobs:
             --namespace argocd \
             --create-namespace \
             --set server.service.type=LoadBalancer \
-            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="classic"
-          kubectl -n argocd rollout status deployment/argocd-server --timeout=3m
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="classic" \
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="eksdemo-argocd-clb" \
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-target-group-name"="eksdemo-argocd-tg"
+          kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
+          echo "✅ ArgoCD installed successfully"
 
       - name: Wait for ArgoCD LoadBalancer
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: argocd_lb
         run: |
+          echo "Waiting for ArgoCD LoadBalancer..."
           for i in {1..30}; do
             ARGOCD_SERVER=$(kubectl get svc argocd-server -n argocd -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             if [[ -n "$ARGOCD_SERVER" ]]; then
               echo "ARGOCD_SERVER=$ARGOCD_SERVER" >> $GITHUB_ENV
+              echo "✅ ArgoCD LoadBalancer ready: $ARGOCD_SERVER"
               break
             fi
+            echo "⏳ Waiting for LoadBalancer (attempt $i/30)..."
             sleep 10
           done
           if [[ -z "$ARGOCD_SERVER" ]]; then
+            echo "❌ Failed to get ArgoCD LoadBalancer"
             exit 1
           fi
 
       - name: Get VPC ID and set environment variables
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: get_vpc
         run: |
           VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=tag:Name,Values=${{ env.vpc_name }}" \
@@ -107,17 +144,22 @@ jobs:
           echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
           echo "ECR_NAME=${{ secrets.ECR_NAME }}" >> $GITHUB_ENV
           echo "AWS_ACCOUNT_NUMBER=${{ secrets.AWS_ACCOUNT_NUMBER }}" >> $GITHUB_ENV
+          echo "✅ VPC ID: $VPC_ID"
 
       - name: Apply ArgoCD Yamls
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: apply_yamls
         run: |
+          echo "Applying ArgoCD configurations..."
           envsubst < ArgoCD/externalCharts/infra.yaml | kubectl apply -f -
           envsubst < ArgoCD/myChart/argo.yaml | kubectl apply -f -
           sleep 10
           kubectl get applications -n argocd
+          echo "✅ ArgoCD YAMLs applied successfully"
           
       - name: Smoke Test Application
-        if: ${{ github.event.inputs.action == 'apply' }}
+        if: steps.check_cluster.outputs.cluster_exists == 'true' && github.event.inputs.action == 'apply'
+        id: smoke_test
         run: |
           echo "Running smoke test on https://www.saharbittman.com ..."
           for i in $(seq 1 30); do
@@ -132,12 +174,80 @@ jobs:
           echo "❌ Smoke test failed!"
           exit 1
 
-      - name: Destroy ArgoCD, Apps, CLB, and Target Groups
-        if: ${{ github.event.inputs.action == 'destroy' }}
+      - name: Cleanup on Failure
+        if: |
+          failure() &&
+          github.event.inputs.action == 'apply' &&
+          steps.check_cluster.outputs.cluster_exists == 'true'
         env:
           AWS_REGION: us-west-2
-          CLB_NAME: argocd-server
+          CLB_NAME: eksdemo-argocd-clb
+          TG_NAME: eksdemo-argocd-tg
         run: |
+          echo "🧹 Starting cleanup due to deployment failure..."
+          
+          # Remove finalizers
+          echo "Removing finalizers..."
+          kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
+            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          kubectl get applicationsets.argoproj.io -n argocd -o name 2>/dev/null | \
+            xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+          kubectl get ingress -A -o name 2>/dev/null | \
+            xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+
+          # Delete ArgoCD resources
+          echo "Deleting ArgoCD resources..."
+          kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
+          kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=60s || true
+          kubectl delete ingress --all -A --timeout=60s || true
+          helm uninstall argocd -n argocd --wait --timeout=2m || true
+          kubectl delete svc -n argocd argocd-server --ignore-not-found || true
+
+          # Wait a bit for AWS to process the deletion
+          sleep 15
+
+          # Delete Load Balancer by name
+          echo "Checking for Classic Load Balancer: ${CLB_NAME}..."
+          LB_ARN=$(aws elb describe-load-balancers --region "$AWS_REGION" --load-balancer-names "${CLB_NAME}" --query "LoadBalancerDescriptions[0].LoadBalancerName" --output text 2>/dev/null || echo "")
+          
+          if [[ -n "$LB_ARN" && "$LB_ARN" != "None" && "$LB_ARN" != "" ]]; then
+            echo "Found Classic Load Balancer, deleting: ${CLB_NAME}"
+            aws elb delete-load-balancer --load-balancer-name "${CLB_NAME}" --region "$AWS_REGION" || true
+            echo "✅ Classic Load Balancer deleted"
+          else
+            echo "ℹ️ Classic Load Balancer not found or already deleted"
+          fi
+
+          # Delete Target Groups by tag or name pattern
+          echo "Checking for Target Groups with name pattern: ${TG_NAME}..."
+          TG_ARNS=$(aws elbv2 describe-target-groups --region "$AWS_REGION" --query "TargetGroups[?contains(TargetGroupName, '${TG_NAME}')].TargetGroupArn" --output text 2>/dev/null || echo "")
+          
+          if [[ -n "$TG_ARNS" && "$TG_ARNS" != "None" && "$TG_ARNS" != "" ]]; then
+            for TG in $TG_ARNS; do
+              echo "Deregistering targets from: $TG"
+              TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG" --region "$AWS_REGION" --query "TargetHealthDescriptions[].Target.Id" --output text 2>/dev/null || echo "")
+              for T in $TARGETS; do
+                aws elbv2 deregister-targets --target-group-arn "$TG" --targets Id=$T --region "$AWS_REGION" || true
+              done
+              echo "Deleting Target Group: $TG"
+              aws elbv2 delete-target-group --target-group-arn "$TG" --region "$AWS_REGION" || true
+            done
+            echo "✅ Target Groups deleted"
+          else
+            echo "ℹ️ No Target Groups found with pattern: ${TG_NAME}"
+          fi
+          
+          echo "✅ Cleanup completed"
+
+      - name: Destroy ArgoCD, Apps, CLB, and Target Groups
+        if: github.event.inputs.action == 'destroy' && steps.check_cluster.outputs.cluster_exists == 'true'
+        env:
+          AWS_REGION: us-west-2
+          CLB_NAME: eksdemo-argocd-clb
+          TG_NAME: eksdemo-argocd-tg
+        run: |
+          echo "🗑️ Starting manual destroy..."
+          
           # Remove finalizers
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
@@ -151,15 +261,49 @@ jobs:
           kubectl delete applicationsets.argoproj.io --all -n argocd --timeout=60s || true
           kubectl delete ingress --all -A --timeout=60s || true
           helm uninstall argocd -n argocd --wait --timeout=2m || true
-          kubectl delete svc -n argocd ${CLB_NAME} --ignore-not-found
+          kubectl delete svc -n argocd argocd-server --ignore-not-found
 
-          # Delete ALB and Target Groups
-          LB_ARN=$(aws elbv2 describe-load-balancers --names "$CLB_NAME" --region "$AWS_REGION" --query "LoadBalancers[0].LoadBalancerArn" --output text)
-          for TG in $(aws elbv2 describe-target-groups --load-balancer-arn "$LB_ARN" --region "$AWS_REGION" --query "TargetGroups[].TargetGroupArn" --output text); do
-            TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG" --region "$AWS_REGION" --query "TargetHealthDescriptions[].Target.Id" --output text)
-            for T in $TARGETS; do
-              aws elbv2 deregister-targets --target-group-arn "$TG" --targets Id=$T --region "$AWS_REGION"
+          # Wait for AWS to process the deletion
+          sleep 15
+
+          # Delete Classic Load Balancer
+          echo "Checking for Classic Load Balancer: ${CLB_NAME}..."
+          LB_EXISTS=$(aws elb describe-load-balancers --region "$AWS_REGION" --load-balancer-names "${CLB_NAME}" --query "LoadBalancerDescriptions[0].LoadBalancerName" --output text 2>/dev/null || echo "")
+          
+          if [[ -n "$LB_EXISTS" && "$LB_EXISTS" != "None" && "$LB_EXISTS" != "" ]]; then
+            echo "Deleting Classic Load Balancer: ${CLB_NAME}"
+            aws elb delete-load-balancer --load-balancer-name "${CLB_NAME}" --region "$AWS_REGION" || true
+            echo "✅ Classic Load Balancer deleted"
+          else
+            echo "ℹ️ Classic Load Balancer not found: ${CLB_NAME}"
+          fi
+
+          # Delete Target Groups
+          echo "Checking for Target Groups with name pattern: ${TG_NAME}..."
+          TG_ARNS=$(aws elbv2 describe-target-groups --region "$AWS_REGION" --query "TargetGroups[?contains(TargetGroupName, '${TG_NAME}')].TargetGroupArn" --output text 2>/dev/null || echo "")
+          
+          if [[ -n "$TG_ARNS" && "$TG_ARNS" != "None" && "$TG_ARNS" != "" ]]; then
+            for TG in $TG_ARNS; do
+              echo "Processing Target Group: $TG"
+              TARGETS=$(aws elbv2 describe-target-health --target-group-arn "$TG" --region "$AWS_REGION" --query "TargetHealthDescriptions[].Target.Id" --output text 2>/dev/null || echo "")
+              for T in $TARGETS; do
+                echo "Deregistering target: $T"
+                aws elbv2 deregister-targets --target-group-arn "$TG" --targets Id=$T --region "$AWS_REGION" || true
+              done
+              echo "Deleting Target Group: $TG"
+              aws elbv2 delete-target-group --target-group-arn "$TG" --region "$AWS_REGION" || true
             done
-            aws elbv2 delete-target-group --target-group-arn "$TG" --region "$AWS_REGION"
-          done
-          aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" --region "$AWS_REGION"
+            echo "✅ Target Groups deleted"
+          else
+            echo "ℹ️ No Target Groups found with pattern: ${TG_NAME}"
+          fi
+          
+          echo "✅ Destroy completed"
+
+      - name: Skip deployment - Cluster not ready
+        if: steps.check_cluster.outputs.cluster_exists == 'false' && github.event.inputs.action == 'apply'
+        run: |
+          echo "⚠️ EKS cluster '${{ env.cluster_name }}' does not exist or is not ready yet."
+          echo "Please run the infrastructure workflow first to create the cluster."
+          echo "This workflow will run automatically once the cluster is ready."
+          exit 0
