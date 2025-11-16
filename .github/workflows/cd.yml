@@ -77,9 +77,11 @@ jobs:
             --create-namespace \
             --set server.service.type=LoadBalancer \
             --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic \
-            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}" \
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}"
+          
           kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
           echo "✅ ArgoCD installed successfully"
+
           
 
       - name: Get VPC and Deploy Apps
