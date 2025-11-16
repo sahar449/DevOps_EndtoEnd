@@ -48,7 +48,7 @@ jobs:
       - name: Update kubeconfig for EKS
         if: github.event.inputs.action == 'apply'
         run: |
-          aws eks update-kubeconfig --region ${{ env.aws_region }} --name ${{ env.cluster_name }}
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
 
       - name: Configure aws-auth
         if: github.event.inputs.action == 'apply'
@@ -78,7 +78,7 @@ jobs:
             --create-namespace \
             --set server.service.type=LoadBalancer \
             --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"="classic" \
-            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.argocd_clb_name }}" 
+            --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}" 
           kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
           echo "✅ ArgoCD installed successfully"
 
