@@ -91,21 +91,21 @@ jobs:
           kubectl get applications -n argocd
 
       # Smoke test
-      - name: Smoke Test
-        if: github.event.inputs.action == 'apply'
-        run: |
-          for i in {1..30}; do
-            status=$(curl -s -w "%{http_code}" -o /tmp/curl_output.txt https://www.saharbittman.com || echo "000")
-            cat /tmp/curl_output.txt
-            if [ "$status" = "200" ]; then
-              echo "✅ App is live!"
-              exit 0
-            fi
-            echo "⏳ Attempt $i/30 - Status: $status"
-            sleep 15
-          done
-          echo "❌ Smoke test failed"
-          exit 1
+        - name: Smoke Test
+          if: github.event.inputs.action == 'apply'
+          run: |
+            for i in {1..30}; do
+              status=$(curl -s -w "%{http_code}" https://www.saharbittman.com -o >(cat) || echo "000")
+              if [ "$status" = "200" ]; then
+                echo "✅ App is live!"
+                exit 0
+              fi
+              echo "⏳ Attempt $i/30 - Status: $status"
+              sleep 15
+            done
+            echo "❌ Smoke test failed"
+            exit 1
+
 
       # Destroy everything
       - name: Destroy Everything
