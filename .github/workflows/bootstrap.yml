@@ -74,34 +74,4 @@ jobs:
           cd infra
           terraform destroy -auto-approve
 
-      destroy-bootstrap:
-      needs: deploy
-      if: github.event.inputs.action == 'destroy' && success()
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout
-          uses: actions/checkout@v4
-
-        - name: Setup Terraform
-          uses: hashicorp/setup-terraform@v2
-          with:
-            terraform_version: 1.5.7 
-
-        - name: Configure AWS
-          uses: aws-actions/configure-aws-credentials@v4
-          with:
-            role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-            aws-region: ${{ env.AWS_REGION }}
-            role-session-name: github-actions
-
-        - name: Terraform Init
-          run: |
-            cd infra
-            terraform init -upgrade
-
-        - name: Destroy Bootstrap Infra
-          run: |
-            cd infra
-            terraform destroy -auto-approve
-            echo "✅ Bootstrap destroy complete"
-
+  

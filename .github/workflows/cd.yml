@@ -119,23 +119,33 @@ jobs:
           helm uninstall argocd -n argocd --timeout=2m || true
           echo "✅ CD destroy complete"
 
-  destroy-bootstrap:
-    needs: deploy
-    if: github.event.inputs.action == 'destroy' && success()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      destroy-bootstrap:
+      needs: deploy
+      if: github.event.inputs.action == 'destroy' && success()
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: github-actions
+        - name: Setup Terraform
+          uses: hashicorp/setup-terraform@v2
+          with:
+            terraform_version: 1.5.7 
 
-      - name: Destroy Bootstrap Infra
-        run: |
-          cd infra
-          terraform destroy -auto-approve
-          echo "✅ Bootstrap destroy complete"
+        - name: Configure AWS
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+            aws-region: ${{ env.AWS_REGION }}
+            role-session-name: github-actions
+
+        - name: Terraform Init
+          run: |
+            cd infra
+            terraform init -upgrade
+
+        - name: Destroy Bootstrap Infra
+          run: |
+            cd infra
+            terraform destroy -auto-approve
+            echo "✅ Bootstrap destroy complete"
