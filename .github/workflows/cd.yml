@@ -1,4 +1,3 @@
-# Workflow: CD to EKS
 name: CD to EKS
 
 on:
@@ -9,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Deploy or Destroy"
+        description: "Apply or Destroy"
         required: true
         default: "apply"
         type: choice
@@ -99,16 +98,20 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
         run: |
           for i in {1..30}; do
-            status=$(curl -s -w "%{http_code}" https://www.saharbittman.com -o >(cat) || echo "000")
-            if [ "$status" = "200" ]; then
-              echo "✅ App is live!"
+            http_status=$(curl -s -o /dev/null -w "%{http_code}" https://www.saharbittman.com || echo "000")
+
+            if [ "$http_status" = "200" ]; then
+              echo "✅ App is live! ($http_status)"
               exit 0
             fi
-            echo "⏳ Attempt $i/30 - Status: $status"
+
+            echo "⏳ Attempt $i/30 - Status: $http_status"
             sleep 15
           done
+
           echo "❌ Smoke test failed"
           exit 1
+
 
       # ========== DESTROY ==========
       - name: Destroy Everything

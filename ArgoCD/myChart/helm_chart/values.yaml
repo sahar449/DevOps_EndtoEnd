@@ -27,6 +27,8 @@ ingress:
     external-dns.alpha.kubernetes.io/hostname: www.saharbittman.com
     alb.ingress.kubernetes.io/load-balancer-name: eksdemo-flask-alb
     alb.ingress.kubernetes.io/target-group-name: eksdemo-flask-tg
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=10
+
   hosts:
     - host: www.saharbittman.com
       paths:
