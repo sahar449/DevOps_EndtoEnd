@@ -105,7 +105,7 @@ jobs:
               exit 0
             fi
 
-            echo "⏳ Attempt $i/30 - Status: $http_status"
+            echo "⏳ Attempt $i/100 - Status: $http_status"
             sleep 15
           done
 
@@ -114,7 +114,6 @@ jobs:
 
 
       # ========== DESTROY ==========
-      # ========== DESTROY - The Enhanced Cleanup Step with Waiter Fix ==========
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
@@ -161,77 +160,66 @@ jobs:
           # the AWS Load Balancer Controller failed to clean them up.
           # =========================================================
           echo "🔨 Starting Direct AWS Load Balancer Cleanup..."
-          
-          FLASK_ALB_NAME="${{ env.FLASK_ALB }}"
-          TG_PREFIX="eksdemo-flask-tg" # As defined in your values.yaml
-          
-          # 1. Find and Delete Load Balancer
+
+          # Discover ALB automatically by the Ingress Stack Tag
+          ING_STACK="default/flask-app-ingress"
+
           ALB_ARN=$(aws elbv2 describe-load-balancers \
-              --region ${{ env.AWS_REGION }} \
-              --names "$FLASK_ALB_NAME" \
-              --query "LoadBalancers[0].LoadBalancerArn" \
-              --output text)
-              
-          if [ "$ALB_ARN" != "None" ] && [ -n "$ALB_ARN" ]; then
-              echo "🗑️ Found ALB. Deleting: $FLASK_ALB_NAME"
-              
-              # Explicitly disable Deletion Protection first (just in case the annotation failed)
-              aws elbv2 modify-load-balancer-attributes \
-                  --load-balancer-arn "$ALB_ARN" \
-                  --attributes Key=deletion_protection.enabled,Value=false \
-                  --region ${{ env.AWS_REGION }} || true
-                  
-              # Delete the ALB (This should automatically delete associated Target Groups)
-              aws elbv2 delete-load-balancer \
-                  --load-balancer-arn "$ALB_ARN" \
-                  --region ${{ env.AWS_REGION }}
-                  
-              # ⚠️ FIX for 'load-balancer-not-exists' error: Ensure the command is correct.
-              echo "⌛ Waiting for ALB deletion confirmation from AWS..."
-              aws elbv2 wait load-balancer-not-exists \
-                  --load-balancer-arn "$ALB_ARN" \
-                  --region ${{ env.AWS_REGION }}
-                  
-              echo "✅ ALB deleted successfully."
+            --region "${{ env.AWS_REGION }}" \
+            --query "LoadBalancers[?contains(Tags[?Key=='ingress.k8s.aws/stack'].Value | [0], \`${ING_STACK}\`)].LoadBalancerArn" \
+            --output text --no-paginate --include-tags)
+
+          if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" = "None" ]; then
+            echo "✅ No ALB found for stack $ING_STACK"
           else
-              echo "✅ ALB '$FLASK_ALB_NAME' not found."
+            echo "🗑️ Found ALB for stack $ING_STACK"
+            echo "   ARN: $ALB_ARN"
+
+            # Disable deletion protection
+            aws elbv2 modify-load-balancer-attributes \
+              --load-balancer-arn "$ALB_ARN" \
+              --attributes Key=deletion_protection.enabled,Value=false \
+              --region "${{ env.AWS_REGION }}" || true
+
+            echo "🗑️ Deleting ALB..."
+            aws elbv2 delete-load-balancer \
+              --load-balancer-arn "$ALB_ARN" \
+              --region "${{ env.AWS_REGION }}" || true
+
+            # Wait for deletion
+            for i in {1..20}; do
+              CHECK=$(aws elbv2 describe-load-balancers \
+                --load-balancer-arns "$ALB_ARN" \
+                --region "${{ env.AWS_REGION }}" 2>&1 || echo "DELETED")
+
+              if [[ "$CHECK" == "DELETED" ]]; then
+                echo "✅ ALB deleted."
+                break
+              fi
+              echo "⏳ Waiting for ALB to disappear..."
+              sleep 5
+            done
           fi
 
-          # 2. Cleanup Any Remaining Target Groups (Safety check)
-          # This finds any TGs matching the name prefix and deletes them just in case.
+          # Cleanup Target Groups matching the same stack tag
           TG_ARNS=$(aws elbv2 describe-target-groups \
-              --region ${{ env.AWS_REGION }} \
-              --query "TargetGroups[?starts_with(TargetGroupName, \`$TG_PREFIX\`)].TargetGroupArn" \
-              --output text)
+            --region "${{ env.AWS_REGION }}" \
+            --query "TargetGroups[?contains(Tags[?Key=='ingress.k8s.aws/stack'].Value | [0], \`${ING_STACK}\`)].TargetGroupArn" \
+            --output text --no-paginate --include-tags)
 
           if [ -n "$TG_ARNS" ]; then
-              echo "🗑️ Deleting remaining Target Groups with prefix $TG_PREFIX..."
-              for TG_ARN in $TG_ARNS; do
-                  echo "   -> Deleting TG ARN: $TG_ARN"
-                  aws elbv2 delete-target-group --target-group-arn "$TG_ARN" --region ${{ env.AWS_REGION }} || true
-              done
-              echo "✅ All matching Target Groups queued for deletion."
+            echo "🗑️ Deleting Target Groups related to $ING_STACK..."
+            for TG in $TG_ARNS; do
+              echo "   -> Deleting TG: $TG"
+              aws elbv2 delete-target-group \
+                --target-group-arn "$TG" \
+                --region "${{ env.AWS_REGION }}" || true
+            done
+            echo "✅ Target groups removed."
           else
-              echo "✅ No remaining Target Groups found."
+            echo "✅ No related TGs found."
           fi
 
-          echo "🗑️ Uninstalling ArgoCD..."
-          helm uninstall argocd -n argocd --timeout=2m || true
-
-          echo "⌛ Waiting for ArgoCD namespace to clean..."
-          for i in {1..10}; do
-            ns_exists=$(kubectl get ns argocd --no-headers 2>/dev/null | wc -l)
-
-            if [ "$ns_exists" -eq 0 ]; then
-              echo "✅ ArgoCD namespace removed."
-              break
-            fi
-
-            echo "⏳ Waiting for namespace argocd to terminate..."
-            sleep 10
-          done
-
-          echo "🏁 Cleanup finished."
 
 
 
