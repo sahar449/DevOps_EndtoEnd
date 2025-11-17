@@ -113,115 +113,27 @@ jobs:
           exit 1
 
 
-      # ========== DESTROY ==========
+       # ========== DESTROY ==========
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
           echo "🗑️ Starting cleanup..."
-
-          # Ensure kubeconfig is updated for cluster access
           aws eks update-kubeconfig --region "${{ env.AWS_REGION }}" --name "${{ env.CLUSTER_NAME }}" || true
-
           echo "🔧 Removing Kubernetes finalizers..."
-          # 1. Remove ArgoCD ApplicationSet, Application, and Ingress Finalizers.
-          # This is critical to allow Kubernetes to fully delete the resources, 
-          # and signals the AWS LBC to clean up AWS resources (if it can).
           kubectl get applicationset.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
           kubectl get applications.argoproj.io -n argocd -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -n argocd -p '{"metadata":{"finalizers":[]}}' --type=merge || true
           kubectl get ingress -A -o name 2>/dev/null | \
             xargs -r -I {} kubectl patch {} -p '{"metadata":{"finalizers":[]}}' --type=merge || true
-
-          echo "🗑️ Deleting Ingresses and Applications..."
+          echo "🗑️ Deleting ingresses..."
           kubectl delete ingress --all -A --timeout=60s || true
+          echo "🗑️ Deleting ArgoCD ApplicationSets..."
           kubectl delete applicationset.argoproj.io --all -n argocd --timeout=60s || true
+          echo "🗑️ Deleting ArgoCD Applications..."
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
-
-          echo "⌛ Waiting for Kubernetes resources to fully delete..."
-          # Wait for K8s resources (Ingress, Apps) to disappear after finalizers removal
-          for i in {1..10}; do
-            remaining_appsets=$(kubectl get applicationset.argoproj.io -n argocd --no-headers 2>/dev/null | wc -l)
-            remaining_apps=$(kubectl get applications.argoproj.io -n argocd --no-headers 2>/dev/null | wc -l)
-            remaining_ing=$(kubectl get ingress -A --no-headers 2>/dev/null | wc -l)
-
-            if [ "$remaining_appsets" -eq 0 ] && [ "$remaining_apps" -eq 0 ] && [ "$remaining_ing" -eq 0 ]; then
-              echo "✅ All ArgoCD and Ingress resources deleted from Kubernetes."
-              break
-            fi
-
-            echo "⏳ Still removing... (AppSets: $remaining_appsets, Apps: $remaining_apps, Ingress: $remaining_ing)"
-            sleep 10
-          done
-          
-          # =========================================================
-          # 🚨 CRITICAL: Direct AWS CLI Cleanup (Forced Deletion)
-          # This step ensures the ALB and Target Groups are deleted even if 
-          # the AWS Load Balancer Controller failed to clean them up.
-          # =========================================================
-          echo "🔨 Starting Direct AWS Load Balancer Cleanup..."
-
-          # Discover ALB automatically by the Ingress Stack Tag
-          ING_STACK="default/flask-app-ingress"
-
-          ALB_ARN=$(aws elbv2 describe-load-balancers \
-            --region "${{ env.AWS_REGION }}" \
-            --query "LoadBalancers[?contains(Tags[?Key=='ingress.k8s.aws/stack'].Value | [0], \`${ING_STACK}\`)].LoadBalancerArn" \
-            --output text --no-paginate --include-tags)
-
-          if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" = "None" ]; then
-            echo "✅ No ALB found for stack $ING_STACK"
-          else
-            echo "🗑️ Found ALB for stack $ING_STACK"
-            echo "   ARN: $ALB_ARN"
-
-            # Disable deletion protection
-            aws elbv2 modify-load-balancer-attributes \
-              --load-balancer-arn "$ALB_ARN" \
-              --attributes Key=deletion_protection.enabled,Value=false \
-              --region "${{ env.AWS_REGION }}" || true
-
-            echo "🗑️ Deleting ALB..."
-            aws elbv2 delete-load-balancer \
-              --load-balancer-arn "$ALB_ARN" \
-              --region "${{ env.AWS_REGION }}" || true
-
-            # Wait for deletion
-            for i in {1..20}; do
-              CHECK=$(aws elbv2 describe-load-balancers \
-                --load-balancer-arns "$ALB_ARN" \
-                --region "${{ env.AWS_REGION }}" 2>&1 || echo "DELETED")
-
-              if [[ "$CHECK" == "DELETED" ]]; then
-                echo "✅ ALB deleted."
-                break
-              fi
-              echo "⏳ Waiting for ALB to disappear..."
-              sleep 5
-            done
-          fi
-
-          # Cleanup Target Groups matching the same stack tag
-          TG_ARNS=$(aws elbv2 describe-target-groups \
-            --region "${{ env.AWS_REGION }}" \
-            --query "TargetGroups[?contains(Tags[?Key=='ingress.k8s.aws/stack'].Value | [0], \`${ING_STACK}\`)].TargetGroupArn" \
-            --output text --no-paginate --include-tags)
-
-          if [ -n "$TG_ARNS" ]; then
-            echo "🗑️ Deleting Target Groups related to $ING_STACK..."
-            for TG in $TG_ARNS; do
-              echo "   -> Deleting TG: $TG"
-              aws elbv2 delete-target-group \
-                --target-group-arn "$TG" \
-                --region "${{ env.AWS_REGION }}" || true
-            done
-            echo "✅ Target groups removed."
-          else
-            echo "✅ No related TGs found."
-          fi
-
-
-
+          echo "🗑️ Uninstalling ArgoCD..."
+          helm uninstall argocd -n argocd --timeout=2m || true
 
 
   destroy-bootstrap:
