@@ -132,14 +132,45 @@ jobs:
           echo "🗑️ Deleting ingresses..."
           kubectl delete ingress --all -A --timeout=60s || true
 
-          echo "🗑️ Deleting ArgoCD ApplicationSets..."
+          echo "🗑️ Deleting ApplicationSets..."
           kubectl delete applicationset.argoproj.io --all -n argocd --timeout=60s || true
 
-          echo "🗑️ Deleting ArgoCD Applications..."
+          echo "🗑️ Deleting Applications..."
           kubectl delete applications.argoproj.io --all -n argocd --timeout=60s || true
+
+          echo "⌛ Waiting for ArgoCD resources to fully delete..."
+          for i in {1..10}; do
+            remaining_appsets=$(kubectl get applicationset.argoproj.io -n argocd --no-headers 2>/dev/null | wc -l)
+            remaining_apps=$(kubectl get applications.argoproj.io -n argocd --no-headers 2>/dev/null | wc -l)
+            remaining_ing=$(kubectl get ingress -A --no-headers 2>/dev/null | wc -l)
+
+            if [ "$remaining_appsets" -eq 0 ] && [ "$remaining_apps" -eq 0 ] && [ "$remaining_ing" -eq 0 ]; then
+              echo "✅ All ArgoCD resources deleted."
+              break
+            fi
+
+            echo "⏳ Still removing... (AppSets: $remaining_appsets, Apps: $remaining_apps, Ingress: $remaining_ing)"
+            sleep 10
+          done
 
           echo "🗑️ Uninstalling ArgoCD..."
           helm uninstall argocd -n argocd --timeout=2m || true
+
+          echo "⌛ Waiting for ArgoCD namespace to clean..."
+          for i in {1..10}; do
+            ns_exists=$(kubectl get ns argocd --no-headers 2>/dev/null | wc -l)
+
+            if [ "$ns_exists" -eq 0 ]; then
+              echo "✅ ArgoCD namespace removed."
+              break
+            fi
+
+            echo "⏳ Waiting for namespace argocd to terminate..."
+            sleep 10
+          done
+
+          echo "🏁 Cleanup finished."
+
 
 
 
