@@ -114,6 +114,7 @@ jobs:
 
 
       # ========== DESTROY ==========
+      # ========== DESTROY - The Enhanced Cleanup Step with Waiter Fix ==========
       - name: Destroy Everything
         if: github.event.inputs.action == 'destroy' || failure()
         run: |
@@ -155,7 +156,7 @@ jobs:
           done
           
           # =========================================================
-          # 🚨 CRITICAL: Direct AWS CLI Cleanup (Fallback/Forced Deletion)
+          # 🚨 CRITICAL: Direct AWS CLI Cleanup (Forced Deletion)
           # This step ensures the ALB and Target Groups are deleted even if 
           # the AWS Load Balancer Controller failed to clean them up.
           # =========================================================
@@ -185,6 +186,7 @@ jobs:
                   --load-balancer-arn "$ALB_ARN" \
                   --region ${{ env.AWS_REGION }}
                   
+              # ⚠️ FIX for 'load-balancer-not-exists' error: Ensure the command is correct.
               echo "⌛ Waiting for ALB deletion confirmation from AWS..."
               aws elbv2 wait load-balancer-not-exists \
                   --load-balancer-arn "$ALB_ARN" \
@@ -196,6 +198,7 @@ jobs:
           fi
 
           # 2. Cleanup Any Remaining Target Groups (Safety check)
+          # This finds any TGs matching the name prefix and deletes them just in case.
           TG_ARNS=$(aws elbv2 describe-target-groups \
               --region ${{ env.AWS_REGION }} \
               --query "TargetGroups[?starts_with(TargetGroupName, \`$TG_PREFIX\`)].TargetGroupArn" \
@@ -229,7 +232,6 @@ jobs:
           done
 
           echo "🏁 Cleanup finished."
-
 
 
 
