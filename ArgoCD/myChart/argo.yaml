@@ -20,7 +20,7 @@ spec:
       values: |
         app:
           image:
-            repository: ${ECR_NAME}
+            repository: 634647866665.dkr.ecr.us-east-1.amazonaws.com/test
             tag: latest
   destination:
     server: https://kubernetes.default.svc

@@ -70,12 +70,12 @@
 #         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply' || github.event_name == 'workflow_run' }}
 #         run: |
 #           helm repo add argo https://argoproj.github.io/argo-helm
-#           helm repo update
-#           helm upgrade --install argocd argo/argo-cd \
-#             --namespace argocd \
-#             --create-namespace \
-#             --set server.service.type=LoadBalancer \
-#             --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic \
+        #   helm repo update
+        #   helm upgrade --install argocd argo/argo-cd \
+        #     --namespace argocd \
+        #     --create-namespace \
+        #     --set server.service.type=LoadBalancer \
+        #     --set-string server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=classic \
 #             --set server.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-name"="${{ env.ARGOCD_CLB }}"
 #           kubectl -n argocd rollout status deployment/argocd-server --timeout=5m
 
