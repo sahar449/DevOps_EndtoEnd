@@ -132,7 +132,8 @@ jobs:
 
       # Pull the image from SOURCE ECR
       - name: Pull image from SOURCE ECR
-        run: docker pull ${{ secrets.ECR_NAME }}:${{ github.sha }}
+        run: docker pull ${{ secrets.ECR_NAME }}:latest
+
 
       # Assume role to SECOND ACCOUNT via OIDC
       - name: Configure AWS (SECOND ACCOUNT)
