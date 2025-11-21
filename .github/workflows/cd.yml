@@ -125,6 +125,16 @@ jobs:
         if: ${{ success() }}
         run: echo "Image push to second account triggered."
 
+      # Pull image from SOURCE ECR (already logged in to first account)
+      - name: Pull image from SOURCE ECR
+        if: ${{ success() }}
+        env:
+          SRC_ECR: ${{ secrets.ECR_NAME }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker pull "$SRC_ECR:$TAG"
+
+      # Assume role to SECOND ACCOUNT via OIDC
       - name: Configure AWS (SECOND ACCOUNT)
         if: ${{ success() }}
         uses: aws-actions/configure-aws-credentials@v4
@@ -133,27 +143,22 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-second-account
 
-      - name: Login to ECR in SECOND ACCOUNT
+      # Login to SECOND ACCOUNT ECR
+      - name: Login to SECOND ACCOUNT ECR
         if: ${{ success() }}
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Pull, tag and push to SECOND ACCOUNT ECR
+      # Tag and push to SECOND ACCOUNT ECR
+      - name: Tag and Push to SECOND ACCOUNT ECR
         if: ${{ success() }}
         env:
           SRC_ECR: ${{ secrets.ECR_NAME }}
           DST_ECR: ${{ secrets.ECR_NAME_SECOND }}
           TAG: ${{ github.sha }}
         run: |
-          echo "⬇️ Pulling image from source ECR..."
-          docker pull "$SRC_ECR:$TAG"
-
-          echo "🔄 Tagging image for destination ECR..."
           docker tag "$SRC_ECR:$TAG" "$DST_ECR:$TAG"
-
-          echo "⬆️ Pushing image to second ECR..."
           docker push "$DST_ECR:$TAG"
 
-          echo "✅ Successfully pushed image to second AWS account!"
 
 
   #      # ========== DESTROY ==========
