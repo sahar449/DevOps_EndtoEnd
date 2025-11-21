@@ -152,7 +152,7 @@ jobs:
         env:
           SRC_ECR: ${{ secrets.ECR_NAME }}
           DST_ECR: ${{ secrets.ECR_NAME_SECOND }}
-          TAG: ${{ github.sha }}
+          TAG: latest
         run: |
           docker tag "$SRC_ECR:$TAG" "$DST_ECR:$TAG"
           docker push "$DST_ECR:$TAG"
