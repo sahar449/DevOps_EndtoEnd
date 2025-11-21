@@ -157,12 +157,12 @@ jobs:
           docker tag "$SRC_ECR:$TAG" "$DST_ECR:$TAG"
           docker push "$DST_ECR:$TAG"
 
-      - name: Trigger DevOps_Prod repo
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: sahar449/DevOps_Prod
-          event-type: trigger-from-bootstrap
+      # - name: Trigger DevOps_Prod repo
+      #   uses: peter-evans/repository-dispatch@v3
+      #   with:
+      #     token: ${{ secrets.GITHUB_TOKEN }}
+      #     repository: sahar449/DevOps_Prod
+      #     event-type: trigger-from-bootstrap
 
        # ========== DESTROY ==========
       - name: Destroy Everything
