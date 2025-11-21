@@ -140,7 +140,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_SECOND_ACCOUNT }}
-          aws-region: "us-east-2"
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: github-actions-second-account
 
       # Login Docker to SECOND ACCOUNT ECR
